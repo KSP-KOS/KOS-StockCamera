@@ -4,68 +4,239 @@ kOS Stock Camera Addon
 # Description
 
 This project is an addon for [kOS](https://github.com/KSP-KOS/KOS), which is a
-mod for the game [Kerbal Space Program](https://kerbalspaceprogram.com/).  It
-provides a method for controlling the game's stock camera position and
-orientation.  The "stock" designation is important, as other mods that change
-the camera's behavior may conflict with this functionality.
+mod for the game [Kerbal Space Program](https://kerbalspaceprogram.com/). It
+provides scriptable access to KSP camera controls from KerboScript.
+
+The addon exposes both stock-camera helpers and an optional free-camera mode:
+
+* `FLIGHTCAMERA` controls KSP's normal stock flight camera behavior, including
+  camera mode, target, distance, heading, pitch, position, and FOV.
+* `MAPCAMERA` controls map-view camera behavior.
+* `INTERNALCAMERA` controls IVA/internal camera behavior.
+* `FREECAMERA` temporarily takes ownership of KSP's `FlightCamera` so scripts
+  can set an exact camera pose, including position, orientation, roll, anchor
+  behavior, and vessel-relative camera frames.
+
+The "stock" designation remains important. This addon works with KSP's existing
+camera systems. Other mods that replace or heavily modify camera behavior may
+conflict with this functionality.
+
+# Quick start
+
+Existing stock flight-camera usage:
+
+```kerboscript
+set cam to addons:camera:flightcamera.
+set cam:mode to "FREE".
+set cam:fov to 45.
+set cam:distance to 40.
+set cam:heading to 90.
+set cam:pitch to 10.
+```
+
+Free-camera usage:
+
+```kerboscript
+set cam to addons:camera:freecamera.
+set cam:enabled to true.
+set cam:fov to 35.
+set cam:anchor to "SHIP".
+set cam:anchorvessel to ship.
+cam:setpose(V(0, 12, -35), heading(90, 10, 0)).
+wait 5.
+set cam:enabled to false.
+```
+
+`FLIGHTCAMERA` and `FREECAMERA` are intentionally separate. Use
+`FLIGHTCAMERA` for normal stock camera control. Use `FREECAMERA` when a script
+needs temporary full-pose control of the flight camera. Avoid driving both from
+one script at the same time.
 
 # Structures
 
 ## CAMERA
 
-* `FLIGHTCAMERA` - Get Only - `FLIGHTCAMERA` - Returns the object which allows
-control of the camera in the flight scene (see below).
+The root addon is available as:
 
-* `MAPCAMERA`* - Get Only - `MAPCAMERA` - Returns the object which allows control of the camera in mapview.
+```kerboscript
+addons:camera
+```
+
+Suffixes:
+
+| Suffix | Type | Get/Set | Description |
+|---|---:|:---:|---|
+| `FLIGHTCAMERA` | `FlightCamera` | Get | Returns the object which allows control of the stock camera in the flight scene. |
+| `MAPCAMERA` | `MapCamera` | Get | Returns the object which allows control of the camera in map view. |
+| `INTERNALCAMERA` | `InternalCamera` | Get | Returns the object which allows control of the IVA/internal camera. |
+| `FREECAMERA` | `FreeCamera` | Get | Returns the object which allows temporary full-pose control of the flight camera. |
 
 ## FLIGHTCAMERA
 
-* `MODE` - Get Or Set - `String` - Returns the currently selected camera mode.
-When set, changes the camera's mode.  Valid options are `"AUTO"`, `"CHASE"`,
-`"FREE"`, `"LOCKED"`, and `"ORBITAL"`.
-* `FOV` - Get Or Set - `Scalar` - Returns or sets the "field of view" for the
-flight camera.  This is essentially the same concept as "zoom" for real cameras.
-* `PITCH` - Get Or Set - `Scalar` - Returns or sets the pitch component of the
-camera position rotation.  The actual direction this moves the camera depends on
-the frame of reference of the currently selected mode.
-* `HEADING` or `HDG` - Get Or Set - `Scalar` - Returns or sets the yaw component
-of the camera position rotation.  The actual direction this moves the camera
-depends on the frame of reference of the currently selected mode.
-* `DISTANCE` - Get Or Set - `Scalar` - Returns or sets the distance component
-of the camera position, the magnitude applied to the rotation defined by
-pitch and heading above.
-* `POSITION` - Get Or Set - `Vector` - Returns or sets the camera's position
-using a cpu vessel centered vector.  The pitch, heading, and distance components
-above are automatically calculated based on the vector.  **Important: changing
-the camera's target does not change the reference origin of the position
-vector.** Always set the position using vectors based on the cpu vessel.
-* `TARGET` - Get Or Set - `Part` or `Vessel` - Returns or sets the vessel or
-part that the camera is pointing at.  This is the same as the "Aim here" feature
-in stock KSP.
-* `TARGETPOS` - Get Only - For debugging purposes only.
-* `PIVOTPOS` - Get Only - For debugging purposes only.
-* `POSITIONUPDATER` - Get Or Set - `UserDelegate` - A delegate automatically
-called once per tick to update the camera position.  Initially this will return
-a `DONOTHING` delegate.  Set it back to `DONOTHING` to stop the automatic
-position updates.
+`FLIGHTCAMERA` controls KSP's normal flight camera. It does not replace the
+stock camera update model; it changes the same fields KSP normally uses.
+
+| Suffix | Type | Get/Set | Description |
+|---|---:|:---:|---|
+| `MODE`<br>`CAMERAMODE` | `String` | Get/Set | Returns or changes the selected camera mode. Valid options are `"AUTO"`, `"CHASE"`, `"FREE"`, `"LOCKED"`, and `"ORBITAL"`. |
+| `FOV`<br>`CAMERAFOV` | `Scalar` | Get/Set | Returns or sets the field of view for the flight camera. |
+| `PITCH`<br>`CAMERAPITCH` | `Scalar` | Get/Set | Returns or sets the pitch component of the camera position rotation. The actual direction depends on the frame of reference of the current camera mode. |
+| `HEADING`<br>`HDG`<br>`CAMERAHDG` | `Scalar` | Get/Set | Returns or sets the yaw component of the camera position rotation. The actual direction depends on the frame of reference of the current camera mode. |
+| `DISTANCE`<br>`CAMERADISTANCE` | `Scalar` | Get/Set | Returns or sets the distance component of the camera position, the magnitude applied to the rotation defined by pitch and heading. |
+| `POSITION`<br>`CAMERAPOSITION` | `Vector` | Get/Set | Returns or sets the camera's position using a CPU-vessel-centered vector. The pitch, heading, and distance components are automatically calculated from the vector. Changing the camera target does not change the reference origin; always set this using vectors based on the CPU vessel. |
+| `TARGET` | `Part` or `Vessel` | Get/Set | Returns or sets the vessel or part that the camera is pointing at. This is the same as KSP's "Aim here" feature. |
+| `TARGETPOS` | `Vector` | Get | Debugging value. |
+| `PIVOTPOS` | `Vector` | Get | Debugging value. |
+| `POSITIONUPDATER` | `UserDelegate` | Get/Set | A delegate automatically called once per tick to update the camera position. Initially this returns a `DONOTHING` delegate. Set it back to `DONOTHING` to stop automatic position updates. |
 
 ## MAPCAMERA
 
-* `SETFILTER(string, boolean)` - Sets whether objects of a given type should be visible in map mode.  See `FILTERNAMES` for a list of valid names.
-* `GETFILTER(string)` - returns a boolean indicating whether objects of the specified type are visible.  See `FILTERNAMES` for a list of valid names.
-* `COMMNETMODE` - get, set - string - Gets or sets the current commnet display mode.  See `COMMNETNAMES` for a list of valid modes.
-* `PITCH` or `CAMERAPITCH` - get, set - scalar - gets or sets the pitch angle of the camera, relative to the ecliptic plane.
-* `HDG` or `HEADING` or `CAMERAHDG` - get, set - scalar - gets or sets the camera heading (yaw)
-* `DISTANCE` or `CAMERADISTANCE` - get, set - scalar - returns the camera distance from the camera pivot, in meters.  Note that mapview will enforce certain limits on this value.
-* `POSITION` or `CAMERAPOSITION` - get, set - vector - gets or sets the position of the camera, in ship-raw coordinates.  Note that the camera will always be facing towards the pivot point.
-* `TARGET` - get, set - [vessel, body, node] - gets or sets the pivot object.  May be a vessel, body, or node.
-* `FILTERNAMES` - get - list - returns a list of the valid filter names for use with `SETFILTER` and `GETFILTER`
-* `COMMNETNAMES` - get - list - returns a list of the valid commnet display mode names for use with `COMMNETMODE`
+`MAPCAMERA` controls the map-view camera.
+
+| Suffix | Type | Get/Set | Description |
+|---|---:|:---:|---|
+| `SETFILTER(string, boolean)` | Function | — | Sets whether objects of a given type should be visible in map mode. See `FILTERNAMES` for valid names. |
+| `GETFILTER(string)` | Function | — | Returns whether objects of the specified type are visible. See `FILTERNAMES` for valid names. |
+| `COMMNETMODE` | `String` | Get/Set | Gets or sets the current commnet display mode. See `COMMNETNAMES` for valid modes. |
+| `PITCH`<br>`CAMERAPITCH` | `Scalar` | Get/Set | Gets or sets the pitch angle of the camera, relative to the ecliptic plane. |
+| `HDG`<br>`HEADING`<br>`CAMERAHDG` | `Scalar` | Get/Set | Gets or sets the camera heading/yaw. |
+| `DISTANCE`<br>`CAMERADISTANCE` | `Scalar` | Get/Set | Returns the camera distance from the camera pivot, in meters. Map view may enforce limits on this value. |
+| `POSITION`<br>`CAMERAPOSITION` | `Vector` | Get/Set | Gets or sets the position of the camera in SHIP-RAW coordinates. The camera will always face toward the pivot point. |
+| `TARGET` | `Vessel`, `Body`, or `Node` | Get/Set | Gets or sets the pivot object. |
+| `FILTERNAMES` | `List` | Get | Returns the valid filter names for use with `SETFILTER` and `GETFILTER`. |
+| `COMMNETNAMES` | `List` | Get | Returns the valid commnet display mode names for use with `COMMNETMODE`. |
+
+## INTERNALCAMERA
+
+`INTERNALCAMERA` controls the IVA/internal camera when IVA is active.
+
+| Suffix | Type | Get/Set | Description |
+|---|---:|:---:|---|
+| `PITCH`<br>`CAMERAPITCH` | `Scalar` | Get/Set | Gets or sets the IVA camera pitch, clamped to the limits of the active internal camera. |
+| `ROT`<br>`ROTATION`<br>`CAMERAROTATION` | `Scalar` | Get/Set | Gets or sets the IVA camera rotation, clamped to the limits of the active internal camera. |
+| `FOV`<br>`CAMERAFOV` | `Scalar` | Get/Set | Gets or sets the IVA camera field of view. |
+| `ACTIVEKERBAL` | `CrewMember` | Get/Set | Gets or sets the active IVA Kerbal. The Kerbal must be on the active vessel. |
+| `ACTIVE` | `Boolean` | Get | True when the current camera mode is IVA. |
+
+## FREECAMERA
+
+`FREECAMERA` is for scripted full-pose camera control in the flight scene.
+Unlike `FLIGHTCAMERA`, it temporarily takes ownership of KSP's `FlightCamera`
+while enabled, then restores the stock camera when disabled or when KSP changes
+to an incompatible camera context.
+
+Access:
+
+```kerboscript
+set cam to addons:camera:freecamera.
+```
+
+Suffixes:
+
+| Suffix | Type | Get/Set | Description |
+|---|---:|:---:|---|
+| `ENABLED` | `Boolean` | Get/Set | Enables or disables free-camera control. Disabling restores the stock flight camera. |
+| `ACTIVE` | `Boolean` | Get | True when `FREECAMERA` currently owns the flight camera. |
+| `AVAILABLE` | `Boolean` | Get | True when the current scene has a usable `FlightCamera`. |
+| `STATUS` | `String` | Get | Human-readable status/debug text. |
+| `FOV` | `Scalar` | Get/Set | Camera field of view in degrees. Restored to the stock FOV when freecam is disabled. |
+| `POSITION` | `Vector` | Get/Set | Camera position in SHIP-RAW coordinates. |
+| `ORIENTATION` | `Direction` | Get/Set | Full camera orientation as a kOS `Direction`. |
+| `HEADING`<br>`HDG` | `Scalar` | Get/Set | Local-horizon heading in degrees. `0` is north and `90` is east. |
+| `PITCH` | `Scalar` | Get/Set | Local-horizon pitch in degrees. Positive looks upward. |
+| `ROLL` | `Scalar` | Get/Set | Roll around the camera's forward axis, in degrees. |
+| `ANCHOR` | `String` | Get/Set | Position anchor mode. Valid values are `"SHIP"` and `"BODY"`. |
+| `ANCHORVESSEL` | `Vessel` | Get/Set | Vessel used when `ANCHOR` is `"SHIP"`. |
+| `ANCHORFRAME` | `String` | Get/Set | Ship anchor frame. Valid values are `"RAW"` and `"FACING"`. |
+| `SETPOSE(position, direction)` | Function | — | Sets `POSITION` and `ORIENTATION` together. |
+| `COPYFROMSTOCK()` | Function | — | Copies the current stock flight camera pose and FOV into freecam state. |
+| `RESET()` | Function | — | Resets freecam to the saved stock pose when available. |
+
+
+
+### FREECAMERA anchor behavior
+
+`ANCHOR` controls how the desired camera position is preserved over time.
+
+`ANCHOR = "SHIP"` follows `ANCHORVESSEL` with a fixed offset:
+
+```kerboscript
+set cam:anchor to "SHIP".
+set cam:anchorvessel to ship.
+set cam:position to V(...).
+```
+
+`ANCHOR = "BODY"` keeps the camera fixed relative to the current celestial body:
+
+```kerboscript
+set cam:anchor to "BODY".
+set cam:position to V(...).
+```
+
+This is useful for runway, launchpad, flyby, or terrain-fixed shots.
+
+`ANCHORFRAME = "RAW"` is the default. The ship anchor offset is stored in raw
+axes and does not rotate with the vessel.
+
+`ANCHORFRAME = "FACING"` stores the camera position and orientation relative to
+the anchor vessel's current facing. This is useful for low-lag onboard, chase,
+or wing cameras because the C# controller updates the pose natively instead of
+requiring a KerboScript loop to update the camera every tick.
+
+Set the pose first, then switch to `FACING`:
+
+```kerboscript
+set cam:anchor to "SHIP".
+set cam:anchorvessel to ship.
+cam:setpose(ship:facing:starvector * 2
+          + ship:facing:vector     * -1
+          + ship:facing:topvector  * 0.1,
+            ship:facing).
+set cam:anchorframe to "FACING".
+```
+
+### FREECAMERA orientation behavior
+
+You can use local-horizon heading, pitch, and roll:
+
+```kerboscript
+set cam:heading to 90.
+set cam:pitch to 15.
+set cam:roll to 0.
+```
+
+Or assign a kOS `Direction` directly:
+
+```kerboscript
+set cam:orientation to ship:facing.
+set cam:orientation to heading(90, 15, 0).
+```
+
+`SETPOSE(position, direction)` is equivalent to setting `POSITION` and
+`ORIENTATION`, but applies both values as one pose update:
+
+```kerboscript
+cam:setpose(V(0, 12, -35), heading(90, 10, 0)).
+```
+
+Use `SETPOSE` when changing both position and orientation in the same script
+step.
+
+### FREECAMERA scene and IVA behavior
+
+`FREECAMERA` controls KSP's existing `FlightCamera`; it does not create a
+separate Unity camera stack.
+
+When KSP changes away from the normal flight camera, freecam releases control.
+Map-view transitions may suspend and later resume freecam behavior. IVA/internal
+camera mode is treated differently: selecting IVA disables freecam and defers
+`FlightCamera` restore/reparent work until KSP is safely back in flight camera
+mode. This avoids corrupting the first IVA camera frame.
 
 # Building
 
 You must have an IDE or compiler capable of building Visual Studio solutions
-(.sln files).  For the sake of simplicity, this repository assumes that it will
-be located next to the kOS repository, in the same parent directory.  All
+(`.sln` files). For the sake of simplicity, this repository assumes that it will
+be located next to the kOS repository, in the same parent directory. All
 references match those of kOS, and use relative paths pointing to the files in
 the kOS repository.
