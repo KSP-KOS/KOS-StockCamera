@@ -4,6 +4,7 @@ using kOS.Safe.Exceptions;
 using kOS.Safe.Utilities;
 using kOS.Suffixed;
 using UnityEngine;
+using System.Linq;
 
 namespace kOS.AddOns.StockCamera
 {
@@ -66,18 +67,26 @@ namespace kOS.AddOns.StockCamera
 			throw new KOSException("Failed to get active crewmember");
 		}
 
-		private void SetActiveKerbal(CrewMember crewMember)
-		{
-			if (!shared.Vessel.isActiveVessel)
-				throw new KOSException("ActiveKerbal can only be set on the activevessel!");
-			else if (!shared.Vessel.crew.Contains(crewMember.ProtoCrewMember))
-				throw new KOSException($"CrewMember {crewMember.Name} is not on Vessel {shared.Vessel.name}!");
+        private void SetActiveKerbal(CrewMember crewMember)
+        {
+            if (!shared.Vessel.isActiveVessel)
+            {
+                throw new KOSException("ActiveKerbal can only be set on the activevessel!");
+            }
 
-			var cameraManager = CameraManager.Instance;
-			cameraManager.SetCameraIVA(crewMember.ProtoCrewMember.KerbalRef, true);
-		}
+            var protoCrewMember = shared.Vessel.crew
+                .FirstOrDefault(member => member.name == crewMember.Name);
 
-		private BooleanValue GetActive()
+            if (protoCrewMember == null)
+            {
+                throw new KOSException($"CrewMember {crewMember.Name} is not on Vessel {shared.Vessel.name}!");
+            }
+
+            var cameraManager = CameraManager.Instance;
+            cameraManager.SetCameraIVA(protoCrewMember.KerbalRef, true);
+        }
+
+        private BooleanValue GetActive()
 		{
 			return CameraManager.Instance.currentCameraMode == CameraManager.CameraMode.IVA;
 		}
