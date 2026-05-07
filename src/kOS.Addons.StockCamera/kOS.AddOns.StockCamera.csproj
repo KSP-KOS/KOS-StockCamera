@@ -56,14 +56,13 @@
     <Compile Include="CameraSnapshot.cs" />
     <Compile Include="FreeCameraController.cs" />
     <Compile Include="FreeCameraValue.cs" />
-    <Compile Include="VersionInfo.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>
-	  <Publicize Include="Assembly-CSharp"/>
+    <Publicize Include="Assembly-CSharp" />
   </ItemGroup>
   <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
     <PropertyGroup>
