@@ -1,0 +1,11 @@
+{
+  "NAME": "kOS-StockCamera",
+  "URL": "https://raw.githubusercontent.com/KSP-KOS/KOS-StockCamera/master/GameData/kOS-Addons/StockCamera/KOS-StockCamera.version",
+  "DOWNLOAD": "https://github.com/KSP-KOS/KOS-StockCamera/releases",
+  "CHANGE_LOG_URL": "https://raw.githubusercontent.com/KSP-KOS/KOS-StockCamera/master/CHANGELOG.md",
+  "GITHUB": {
+    "USERNAME":"KSP-KOS",
+    "REPOSITORY":"KOS-StockCamera",
+    "ALLOW_PRE_RELEASE":false
+  }
+}
