@@ -1,5 +1,8 @@
 kOS Stock Camera Addon Changelog
 ********************************
+# v0.3.0 unreleased
+- Added new camera mode `ADDONS:CAMERA:FREECAMERA` that comes with several new additions to controlling the camera. See updated README.md for details.
+- Added `ADDONS:CAMERA:LIGHT` for adding and controlling a light source attached to the camera. See updated README.md for details.
 
 # v0.2.0 2021-01-11
 
