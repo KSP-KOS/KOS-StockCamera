@@ -201,7 +201,6 @@ namespace kOS.AddOns.StockCamera
             }
 
             EnsureLightExists();
-            ApplyLightSettings();
             MoveLightBehindCamera(renderingCamera);
             cameraLight.enabled = true;
             status = "Camera light active.";
