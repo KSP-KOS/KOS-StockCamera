@@ -7,6 +7,7 @@ namespace kOS.AddOns.StockCamera
     internal enum FreeCameraAnchor
     {
         Body,
+        Part,
         Ship
     }
 
@@ -33,6 +34,7 @@ namespace kOS.AddOns.StockCamera
         private bool suspendedForCameraMode;
         private bool deferredStockRestoreUntilFlight;
         private bool eventsRegistered;
+        private bool cameraRenderEventRegistered;
 
         // World-space fallback pose.  This is used before POSITION has been set,
         // and while suspending/resuming from map view.
@@ -47,9 +49,14 @@ namespace kOS.AddOns.StockCamera
         private FreeCameraAnchor anchor = FreeCameraAnchor.Ship;
         private FreeCameraAnchorFrame anchorFrame = FreeCameraAnchorFrame.Raw;
         private Vessel anchorVessel;
+        private Part anchorPart;
         private Vector3 anchorOffset;
         private Vector3 anchorFacingOffset;
         private Quaternion anchorFacingRotation = Quaternion.identity;
+        private Vector3 partLocalPosition;
+        private Quaternion partLocalRotation = Quaternion.identity;
+        private Vector3 partFallbackWorldPosition;
+        private Quaternion partFallbackWorldRotation = Quaternion.identity;
 
         // BODY anchoring cannot persist a raw Unity world coordinate because KSP
         // moves the floating origin.  Store the pose in the main body's local
@@ -132,7 +139,7 @@ namespace kOS.AddOns.StockCamera
             }
             set
             {
-                requestedFov = Mathf.Clamp(value, 1f, 179f);
+                requestedFov = Mathf.Clamp(value, 0.001f, 179f);
                 if (active)
                 {
                     ApplyFov();
@@ -152,26 +159,43 @@ namespace kOS.AddOns.StockCamera
             }
         }
 
-        public Quaternion Orientation
+        public Quaternion Facing
         {
             get { return ResolveDesiredWorldRotation(); }
             set
             {
-                // A Direction is an exact quaternion.  Keep it exact until the user
+                // A Direction is an exact quaternion. Keep it exact until the user
                 // next sets HEADING/PITCH/ROLL, which switches back to HPR mode.
                 hasManualRotation = false;
                 StoreWorldRotationForCurrentAnchor(value);
                 SetEulerFieldsFromRotation(value);
                 ApplyDesiredPoseToParent();
-                status = "Free camera orientation set.";
+                status = "Free camera facing set.";
             }
         }
 
+        /// <summary>
+        /// kOS vector-facing assignments are direction vectors, not target points.
+        /// Resolve them using the camera's body-up vector so the result matches
+        /// KerboScript lookdirup(vector, cam:position - body:position) behavior.
+        /// </summary>
+        /// <param name="facingVector">World-space look direction, not a target point.</param>
+        public void SetFacingVector(Vector3 facingVector)
+        {
+            Facing = BuildFacingRotationFromVector(facingVector, ResolveDesiredWorldPosition());
+        }
+
+        /// <summary>
+        /// Atomically stores POSITION and FACING.  This avoids rendering a one-frame
+        /// intermediate pose when a script changes both values in the same tick.
+        /// </summary>
+        /// <param name="relativePosition">Camera position relative to the CPU vessel in SHIP-RAW axes.</param>
+        /// <param name="worldRotation">Exact world-space camera rotation to store.</param>
         public void SetPose(Vector3 relativePosition, Quaternion worldRotation)
         {
             // POSITION is SHIP-RAW, so the input vector is relative to the CPU vessel
             // in raw KSP axes.  Store both parts before applying to avoid a one-frame
-            // intermediate pose when scripts want to change position and orientation
+            // intermediate pose when scripts want to change position and facing
             // together.
             var worldPosition = GetCpuOrigin() + relativePosition;
             hasManualRotation = false;
@@ -182,26 +206,180 @@ namespace kOS.AddOns.StockCamera
             status = "Free camera pose set.";
         }
 
-        public string Anchor
+        /// <summary>
+        /// Vector-facing SETPOSE uses the supplied new position when calculating
+        /// camera body-up, so roll/up semantics match the pose being requested rather
+        /// than the camera's previous position.
+        /// </summary>
+        /// <param name="relativePosition">Camera position relative to the CPU vessel in SHIP-RAW axes.</param>
+        /// <param name="facingVector">World-space look direction, not a target point.</param>
+        public void SetPose(Vector3 relativePosition, Vector3 facingVector)
         {
-            get { return anchor == FreeCameraAnchor.Ship ? "SHIP" : "BODY"; }
-            set
-            {
-                var parsed = ParseAnchor(value);
-                if (parsed == anchor)
-                {
-                    return;
-                }
+            var worldPosition = GetCpuOrigin() + relativePosition;
+            SetPose(relativePosition, BuildFacingRotationFromVector(facingVector, worldPosition));
+        }
 
-                var currentWorldPosition = ResolveDesiredWorldPosition();
-                var currentWorldRotation = ResolveDesiredWorldRotation();
-                anchor = parsed;
-                StoreWorldPositionForCurrentAnchor(currentWorldPosition);
-                StoreWorldRotationForCurrentAnchor(currentWorldRotation);
-                ApplyDesiredPoseToParent();
-                status = "Free camera anchor set to " + Anchor + ".";
-                ShowHudMessage("Anchor: " + Anchor);
+        /// <summary>
+        /// LOOKAT takes a SHIP-RAW target point and changes facing only.  Position and
+        /// anchor state are preserved; body-up at the current camera position supplies
+        /// the effective up vector.
+        /// </summary>
+        /// <param name="relativeTargetPosition">Target point relative to the CPU vessel in SHIP-RAW axes.</param>
+        public void LookAt(Vector3 relativeTargetPosition)
+        {
+            var cameraWorldPosition = ResolveDesiredWorldPosition();
+            var targetWorldPosition = GetCpuOrigin() + relativeTargetPosition;
+            var facingVector = targetWorldPosition - cameraWorldPosition;
+
+            if (facingVector.sqrMagnitude < 0.000001f)
+            {
+                throw new kOS.Safe.Exceptions.KOSException("FREECAM:LOOKAT target must not be the current camera position.");
             }
+
+            var worldRotation = BuildFacingRotationFromVector(facingVector, cameraWorldPosition);
+            hasManualRotation = false;
+            StoreWorldRotationForCurrentAnchor(worldRotation);
+            SetEulerFieldsFromRotation(worldRotation);
+            ApplyDesiredPoseToParent();
+            status = "Free camera look-at set.";
+        }
+
+        /// <summary>
+        /// MOVE is the controller-side implementation of
+        /// `set cam:position to cam:position + delta`, preserving the active anchor
+        /// semantics by routing the result through the normal position storage path.
+        /// </summary>
+        /// <param name="delta">SHIP-RAW position delta to add to the current camera position.</param>
+        public void Move(Vector3 delta)
+        {
+            var relativePosition = GetCurrentRelativePosition() + delta;
+            var worldPosition = GetCpuOrigin() + relativePosition;
+            StoreWorldPositionForCurrentAnchor(worldPosition);
+            ApplyDesiredPoseToParent();
+            status = "Free camera moved.";
+        }
+
+        internal FreeCameraAnchor AnchorMode
+        {
+            get
+            {
+                EnsurePartAnchorIsStillUsable();
+                return anchor;
+            }
+        }
+
+        public Vessel AnchorVessel
+        {
+            get { return GetAnchorVessel(); }
+        }
+
+        public Part AnchorPart
+        {
+            get { return GetAnchorPart(); }
+        }
+
+        public CelestialBody AnchorBody
+        {
+            get { return GetAnchorBody(); }
+        }
+
+        /// <summary>
+        /// Sets the anchor from a string shorthand.  String anchors remain as
+        /// conveniences for scripts; object anchors are preferred for explicit vessel,
+        /// part, or body targets.
+        /// </summary>
+        /// <param name="value">Anchor shorthand such as SHIP/VESSEL or BODY.</param>
+        public void SetAnchor(string value)
+        {
+            var parsed = ParseAnchor(value);
+            if (parsed == FreeCameraAnchor.Body)
+            {
+                SetAnchor(GetCurrentAnchorBody());
+                return;
+            }
+
+            SetAnchor(GetAnchorVessel());
+        }
+
+        /// <summary>
+        /// Anchors the camera to a vessel CoM.  The current visual pose is preserved
+        /// while the vessel-relative raw/facing anchor representations are rebuilt.
+        /// </summary>
+        /// <param name="vessel">Vessel to follow as the anchor.</param>
+        public void SetAnchor(Vessel vessel)
+        {
+            if (vessel == null)
+            {
+                throw new System.ArgumentException("FREECAM:ANCHOR vessel is unavailable.");
+            }
+
+            ChangeAnchor(FreeCameraAnchor.Ship, vessel, null, null, "vessel: " + vessel.vesselName);
+        }
+
+        /// <summary>
+        /// Anchors the camera to a part transform.  Position and facing are stored in
+        /// part-local space, so CoM shifts from fuel burn, staging, or cargo changes do
+        /// not move the camera relative to the selected part.
+        /// </summary>
+        /// <param name="part">Part whose transform should carry the camera pose.</param>
+        public void SetAnchor(Part part)
+        {
+            if (part == null || part.transform == null)
+            {
+                throw new System.ArgumentException("FREECAM:ANCHOR part is unavailable.");
+            }
+
+            var name = string.IsNullOrEmpty(part.partInfo != null ? part.partInfo.title : null) ? part.partName : part.partInfo.title;
+            ChangeAnchor(FreeCameraAnchor.Part, null, part, null, "part: " + name);
+        }
+
+        /// <summary>
+        /// Anchors the camera to a celestial body.  The camera position is stored in
+        /// body-local transform space so it survives KSP floating-origin movement.
+        /// </summary>
+        /// <param name="body">Celestial body to use as the body-fixed anchor.</param>
+        public void SetAnchor(CelestialBody body)
+        {
+            if (body == null || body.transform == null)
+            {
+                throw new System.ArgumentException("FREECAM:ANCHOR body is unavailable.");
+            }
+
+            ChangeAnchor(FreeCameraAnchor.Body, null, null, body, "body: " + body.bodyName);
+        }
+
+        /// <summary>
+        /// Changes anchor type/target while preserving the current world-space pose.
+        /// </summary>
+        /// <param name="newAnchor">Anchor representation to use after the change.</param>
+        /// <param name="vessel">Vessel target when using a vessel anchor.</param>
+        /// <param name="part">Part target when using a part anchor.</param>
+        /// <param name="body">Body target when using a body anchor.</param>
+        /// <param name="messageTarget">Human-readable target text for status/HUD output.</param>
+        private void ChangeAnchor(FreeCameraAnchor newAnchor, Vessel vessel, Part part, CelestialBody body, string messageTarget)
+        {
+            var currentWorldPosition = ResolveDesiredWorldPosition();
+            var currentWorldRotation = ResolveDesiredWorldRotation();
+
+            anchor = newAnchor;
+            if (vessel != null)
+            {
+                anchorVessel = vessel;
+            }
+            if (part != null)
+            {
+                anchorPart = part;
+            }
+            if (body != null)
+            {
+                bodyAnchorBody = body;
+            }
+
+            StoreWorldPositionForCurrentAnchor(currentWorldPosition);
+            StoreWorldRotationForCurrentAnchor(currentWorldRotation);
+            ApplyDesiredPoseToParent();
+            status = "Free camera anchor set to " + messageTarget + ".";
+            ShowHudMessage("Anchor: " + messageTarget);
         }
 
         public string AnchorFrame
@@ -226,26 +404,6 @@ namespace kOS.AddOns.StockCamera
             }
         }
 
-        public Vessel AnchorVessel
-        {
-            get { return GetAnchorVessel(); }
-            set
-            {
-                if (value == null)
-                {
-                    return;
-                }
-
-                var currentWorldPosition = ResolveDesiredWorldPosition();
-                var currentWorldRotation = ResolveDesiredWorldRotation();
-                anchorVessel = value;
-                StoreWorldPositionForCurrentAnchor(currentWorldPosition);
-                StoreWorldRotationForCurrentAnchor(currentWorldRotation);
-                ApplyDesiredPoseToParent();
-                status = "Free camera anchor vessel set to " + value.vesselName + ".";
-                ShowHudMessage("Anchor vessel: " + value.vesselName);
-            }
-        }
 
         public float Heading
         {
@@ -286,6 +444,12 @@ namespace kOS.AddOns.StockCamera
             }
         }
 
+        /// <summary>
+        /// The controller is a singleton, while kOS CPUs are not.  Track the most
+        /// recent SharedObjects provider so SHIP-RAW conversion uses the CPU vessel
+        /// that is currently driving the suffix API.
+        /// </summary>
+        /// <param name="sharedObjects">Current kOS CPU context used for SHIP-RAW conversion.</param>
         public void SetSharedObjects(SharedObjects sharedObjects)
         {
             shared = sharedObjects;
@@ -295,6 +459,11 @@ namespace kOS.AddOns.StockCamera
             }
         }
 
+        /// <summary>
+        /// Records the user's desired freecam state.  Activation may be deferred if
+        /// KSP is temporarily in map view or another non-flight camera mode.
+        /// </summary>
+        /// <param name="enabled">Whether the user wants freecam ownership enabled.</param>
         public void SetRequestedEnabled(bool enabled)
         {
             requestedEnabled = enabled;
@@ -309,6 +478,11 @@ namespace kOS.AddOns.StockCamera
             }
         }
 
+        /// <summary>
+        /// Captures the current stock FlightCamera pose/FOV into the freecam desired
+        /// state without necessarily enabling freecam.  Useful as a safe baseline for
+        /// later scripted adjustments.
+        /// </summary>
         public void CopyFromStockCamera()
         {
             if (!IsFlightCameraAvailable)
@@ -340,6 +514,10 @@ namespace kOS.AddOns.StockCamera
             status = "Copied current stock camera pose.";
         }
 
+        /// <summary>
+        /// Reset prefers the original stock-camera snapshot captured on activation;
+        /// if there is no valid snapshot, clear all stored freecam pose state instead.
+        /// </summary>
         public void ResetCamera()
         {
             if (originalCamera.IsValid)
@@ -397,6 +575,11 @@ namespace kOS.AddOns.StockCamera
             }
         }
 
+        /// <summary>
+        /// LateUpdate is the ownership loop.  It runs after normal vessel/camera
+        /// updates, keeps FlightCamera parented under our transform while active, and
+        /// releases or suspends control when KSP changes camera context.
+        /// </summary>
         private void LateUpdate()
         {
             if (deferredStockRestoreUntilFlight)
@@ -461,6 +644,12 @@ namespace kOS.AddOns.StockCamera
             ApplyActiveCameraPose();
         }
 
+        /// <summary>
+        /// Attempts to activate immediately when FlightCamera is available and in
+        /// Flight mode.  Non-IVA camera modes are treated as temporary suspension; IVA
+        /// is treated as a user context switch and disables the request.
+        /// </summary>
+        /// <returns>True when freecam is active after the attempt.</returns>
         private bool TryActivateOrDefer()
         {
             if (!IsFlightCameraAvailable)
@@ -490,6 +679,13 @@ namespace kOS.AddOns.StockCamera
             return ActivateNow(!resumeFromSuspension);
         }
 
+        /// <summary>
+        /// Takes ownership of KSP's existing FlightCamera by parenting it under a
+        /// controlled transform.  The original stock state is captured once so disable
+        /// can restore normal KSP camera behavior.
+        /// </summary>
+        /// <param name="captureOriginalCamera">True to replace the saved stock-camera snapshot before activation.</param>
+        /// <returns>True when FlightCamera ownership was acquired.</returns>
         private bool ActivateNow(bool captureOriginalCamera)
         {
             flightCamera = FlightCamera.fetch;
@@ -518,7 +714,7 @@ namespace kOS.AddOns.StockCamera
 
             if (requestedFov <= 0f)
             {
-                requestedFov = Mathf.Clamp(originalCamera.Fov, 1f, 179f);
+                requestedFov = Mathf.Clamp(originalCamera.Fov, 0.0001f, 179f);
             }
 
             if (cameraParent == null)
@@ -553,11 +749,16 @@ namespace kOS.AddOns.StockCamera
                 return;
             }
 
-            var fov = Mathf.Clamp(requestedFov, 1f, 179f);
+            var fov = Mathf.Clamp(requestedFov, 0.001f, 179f);
             flightCamera.FieldOfView = fov;
             flightCamera.SetFoV(fov);
         }
 
+        /// <summary>
+        /// Reasserts the freecam pose and disables stock FlightCamera updates every
+        /// frame.  This protects against KSP or another system partially restoring
+        /// target/local transform state while freecam is active.
+        /// </summary>
         private void ApplyActiveCameraPose()
         {
             if (!active || flightCamera == null || cameraParent == null)
@@ -578,6 +779,10 @@ namespace kOS.AddOns.StockCamera
             ApplyFov();
         }
 
+        /// <summary>
+        /// Applies the resolved desired pose to the camera parent, not directly to
+        /// FlightCamera.  FlightCamera itself remains zeroed locally under this parent.
+        /// </summary>
         private void ApplyDesiredPoseToParent()
         {
             if (!active || cameraParent == null)
@@ -596,6 +801,68 @@ namespace kOS.AddOns.StockCamera
             hasDesiredPose = true;
         }
 
+        /// <summary>
+        /// Re-applies BODY-anchor pose immediately before the active flight camera renders.
+        /// KSP can apply floating-origin/Krakensbane corrections after LateUpdate, so a
+        /// body-fixed camera resolved only in LateUpdate may jitter around altitude
+        /// transitions. This targeted render-time correction is limited to BODY anchors
+        /// in Flight camera mode to avoid reintroducing the older IVA/pre-cull issues.
+        /// </summary>
+        /// <param name="renderingCamera">Camera currently entering Unity's pre-cull phase.</param>
+        private void ApplyBodyAnchorRenderCorrection(Camera renderingCamera)
+        {
+            if (!ShouldApplyBodyAnchorRenderCorrection(renderingCamera))
+            {
+                return;
+            }
+
+            var worldPosition = ResolveDesiredWorldPosition();
+            var worldRotation = ResolveDesiredWorldRotation();
+            cameraParent.transform.SetPositionAndRotation(worldPosition, worldRotation);
+
+            if (flightCamera != null)
+            {
+                flightCamera.transform.localPosition = Vector3.zero;
+                flightCamera.transform.localRotation = Quaternion.identity;
+            }
+
+            desiredPosition = worldPosition;
+            desiredRotation = worldRotation;
+            hasDesiredPose = true;
+        }
+
+        /// <summary>
+        /// Guards the BODY-anchor pre-cull correction so only the owned FlightCamera is
+        /// touched, and only while freecam is active in normal Flight camera mode.
+        /// </summary>
+        /// <param name="renderingCamera">Camera Unity is about to render.</param>
+        /// <returns>True when it is safe and useful to run the BODY-anchor correction.</returns>
+        private bool ShouldApplyBodyAnchorRenderCorrection(Camera renderingCamera)
+        {
+            if (!active || anchor != FreeCameraAnchor.Body || cameraParent == null || flightCamera == null)
+            {
+                return false;
+            }
+
+            if (!requestedEnabled || !IsFlightCameraAvailable || !IsCurrentCameraMode(CameraManager.CameraMode.Flight))
+            {
+                return false;
+            }
+
+            if (bodyAnchorBody == null || bodyAnchorBody.transform == null)
+            {
+                return false;
+            }
+
+            return renderingCamera != null && flightCamera.mainCamera != null && renderingCamera == flightCamera.mainCamera;
+        }
+
+        /// <summary>
+        /// Converts the stored anchor representation back into a Unity world position.
+        /// SHIP/FACING rotates the stored offset with the vessel, PART resolves from
+        /// part-local coordinates, and BODY resolves from body-local coordinates to
+        /// survive KSP floating-origin shifts.
+        /// </summary>
         private Vector3 ResolveDesiredWorldPosition()
         {
             if (hasPositionState)
@@ -615,13 +882,28 @@ namespace kOS.AddOns.StockCamera
                     }
                 }
 
-                var resolvedBodyPosition = ResolveBodyAnchoredWorldPosition();
-                if (resolvedBodyPosition.HasValue)
+                if (anchor == FreeCameraAnchor.Part)
                 {
-                    return resolvedBodyPosition.Value;
+                    var resolvedPartPosition = ResolvePartAnchoredWorldPosition();
+                    if (resolvedPartPosition.HasValue)
+                    {
+                        return resolvedPartPosition.Value;
+                    }
+
+                    SwitchLostPartAnchorToVessel();
+                    return ResolveDesiredWorldPosition();
                 }
 
-                return bodyFallbackWorldPosition;
+                if (anchor == FreeCameraAnchor.Body)
+                {
+                    var resolvedBodyPosition = ResolveBodyAnchoredWorldPosition();
+                    if (resolvedBodyPosition.HasValue)
+                    {
+                        return resolvedBodyPosition.Value;
+                    }
+
+                    return bodyFallbackWorldPosition;
+                }
             }
 
             if (hasDesiredPose)
@@ -642,8 +924,25 @@ namespace kOS.AddOns.StockCamera
             return Vector3.zero;
         }
 
+        /// <summary>
+        /// Resolves the desired camera rotation.  Vessel-facing anchor frames store
+        /// rotation relative to the anchor vessel, while HPR mode rebuilds a rotation
+        /// from local-horizon heading/pitch/roll fields.
+        /// </summary>
         private Quaternion ResolveDesiredWorldRotation()
         {
+            if (anchor == FreeCameraAnchor.Part && hasDesiredPose)
+            {
+                var resolvedPartRotation = ResolvePartAnchoredWorldRotation();
+                if (resolvedPartRotation.HasValue)
+                {
+                    return resolvedPartRotation.Value;
+                }
+
+                SwitchLostPartAnchorToVessel();
+                return ResolveDesiredWorldRotation();
+            }
+
             if (anchor == FreeCameraAnchor.Ship && anchorFrame == FreeCameraAnchorFrame.Facing && hasDesiredPose)
             {
                 var vessel = GetAnchorVessel();
@@ -676,6 +975,11 @@ namespace kOS.AddOns.StockCamera
             return Quaternion.identity;
         }
 
+        /// <summary>
+        /// Public POSITION is always SHIP-RAW, even when the internal anchor is BODY
+        /// or vessel-facing.  This converts the currently resolved world pose back to
+        /// the CPU vessel's raw-axis offset.
+        /// </summary>
         private Vector3 GetCurrentRelativePosition()
         {
             var worldPosition = ResolveDesiredWorldPosition();
@@ -692,13 +996,19 @@ namespace kOS.AddOns.StockCamera
             return worldPosition - GetCpuOrigin();
         }
 
+        /// <summary>
+        /// Stores a world position in every anchor representation we may need later.
+        /// Keeping all representations warm lets ANCHOR/ANCHORFRAME changes preserve
+        /// the current visual pose instead of teleporting the camera.
+        /// </summary>
         private void StoreWorldPositionForCurrentAnchor(Vector3 worldPosition)
         {
             hasPositionState = true;
 
-            // Always keep both anchor representations current.  This lets changing
+            // Keep all available anchor representations current.  This lets changing
             // ANCHOR preserve the current visual position without teleporting.
             StoreBodyAnchoredWorldPosition(worldPosition);
+            StorePartAnchoredWorldPosition(worldPosition);
 
             var vessel = GetAnchorVessel();
             if (vessel != null)
@@ -716,10 +1026,16 @@ namespace kOS.AddOns.StockCamera
             hasDesiredPose = true;
         }
 
+        /// <summary>
+        /// Stores both the absolute desired rotation and the vessel-relative rotation
+        /// used by ANCHORFRAME=FACING.
+        /// </summary>
         private void StoreWorldRotationForCurrentAnchor(Quaternion worldRotation)
         {
             desiredRotation = worldRotation;
             hasDesiredPose = true;
+
+            StorePartAnchoredWorldRotation(worldRotation);
 
             var vessel = GetAnchorVessel();
             if (vessel != null)
@@ -732,11 +1048,16 @@ namespace kOS.AddOns.StockCamera
             }
         }
 
+        /// <summary>
+        /// BODY anchoring stores positions in the celestial body's transform space,
+        /// not raw Unity world space, because KSP's floating origin can shift world
+        /// coordinates during flight.
+        /// </summary>
         private void StoreBodyAnchoredWorldPosition(Vector3 worldPosition)
         {
             bodyFallbackWorldPosition = worldPosition;
 
-            var body = GetAnchorBody();
+            var body = anchor == FreeCameraAnchor.Body && bodyAnchorBody != null ? bodyAnchorBody : GetCurrentAnchorBody();
             if (body != null && body.transform != null)
             {
                 bodyAnchorBody = body;
@@ -744,11 +1065,79 @@ namespace kOS.AddOns.StockCamera
             }
         }
 
+        /// <summary>
+        /// PART anchoring stores the camera position in the selected part's local
+        /// transform space so the camera stays fixed relative to that part instead of
+        /// following vessel CoM shifts.
+        /// </summary>
+        private void StorePartAnchoredWorldPosition(Vector3 worldPosition)
+        {
+            partFallbackWorldPosition = worldPosition;
+
+            var part = GetAnchorPart();
+            if (part != null && part.transform != null)
+            {
+                partLocalPosition = part.transform.InverseTransformPoint(worldPosition);
+            }
+        }
+
+        /// <summary>
+        /// PART anchoring stores camera facing relative to the selected part transform,
+        /// giving root-part/part-mounted cameras their expected attached behavior.
+        /// </summary>
+        private void StorePartAnchoredWorldRotation(Quaternion worldRotation)
+        {
+            partFallbackWorldRotation = worldRotation;
+
+            var part = GetAnchorPart();
+            if (part != null && part.transform != null)
+            {
+                partLocalRotation = Quaternion.Inverse(part.transform.rotation) * worldRotation;
+            }
+        }
+
+        /// <summary>
+        /// Resolves the body-local anchor position back to world space.  Returning null
+        /// allows callers to fall back if the body/transform is no longer available.
+        /// </summary>
+        /// <returns>The resolved world position, or null when BODY state cannot be resolved.</returns>
         private Vector3? ResolveBodyAnchoredWorldPosition()
         {
             if (bodyAnchorBody != null && bodyAnchorBody.transform != null)
             {
                 return bodyAnchorBody.transform.TransformPoint(bodyLocalPosition);
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Resolves the part-local anchor position back to world space.  Returning null
+        /// lets callers fall back if the part was destroyed or unloaded.
+        /// </summary>
+        /// <returns>The resolved world position, or null when PART state cannot be resolved.</returns>
+        private Vector3? ResolvePartAnchoredWorldPosition()
+        {
+            var part = GetAnchorPart();
+            if (part != null && part.transform != null)
+            {
+                return part.transform.TransformPoint(partLocalPosition);
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Resolves the part-local anchor rotation back to world space.  Returning null
+        /// lets callers fall back if the part was destroyed or unloaded.
+        /// </summary>
+        /// <returns>The resolved world rotation, or null when PART state cannot be resolved.</returns>
+        private Quaternion? ResolvePartAnchoredWorldRotation()
+        {
+            var part = GetAnchorPart();
+            if (part != null && part.transform != null)
+            {
+                return part.transform.rotation * partLocalRotation;
             }
 
             return null;
@@ -772,6 +1161,16 @@ namespace kOS.AddOns.StockCamera
 
         private CelestialBody GetAnchorBody()
         {
+            if (anchor == FreeCameraAnchor.Body && bodyAnchorBody != null)
+            {
+                return bodyAnchorBody;
+            }
+
+            return GetCurrentAnchorBody();
+        }
+
+        private CelestialBody GetCurrentAnchorBody()
+        {
             var vessel = GetCpuVessel();
             if (vessel != null && vessel.mainBody != null)
             {
@@ -786,6 +1185,145 @@ namespace kOS.AddOns.StockCamera
             return null;
         }
 
+        private Part GetAnchorPart()
+        {
+            if (IsUsablePart(anchorPart))
+            {
+                return anchorPart;
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Converts a lost PART anchor into a vessel anchor while preserving the last
+        /// resolved camera pose.  If the part was decoupled or undocked and remains
+        /// loaded, the part is still usable and this method is not reached; if the
+        /// part was destroyed or unloaded, the camera falls back to the part's current
+        /// vessel when available, otherwise the CPU vessel.
+        /// </summary>
+        private void EnsurePartAnchorIsStillUsable()
+        {
+            if (anchor == FreeCameraAnchor.Part && !IsUsablePart(anchorPart))
+            {
+                SwitchLostPartAnchorToVessel();
+            }
+        }
+
+        /// <summary>
+        /// Degrades an unavailable part anchor to a vessel anchor instead of leaving
+        /// the camera fixed at a stale raw Unity world pose.
+        /// </summary>
+        private void SwitchLostPartAnchorToVessel()
+        {
+            if (anchor != FreeCameraAnchor.Part)
+            {
+                return;
+            }
+
+            var lostPart = anchorPart;
+            var fallbackPosition = ResolveFallbackWorldPosition();
+            var fallbackRotation = ResolveFallbackWorldRotation();
+            var fallbackVessel = GetFallbackVesselForLostPart(lostPart);
+
+            anchor = FreeCameraAnchor.Ship;
+            anchorPart = null;
+
+            if (fallbackVessel != null)
+            {
+                anchorVessel = fallbackVessel;
+            }
+
+            StoreWorldPositionForCurrentAnchor(fallbackPosition);
+            StoreWorldRotationForCurrentAnchor(fallbackRotation);
+            ApplyDesiredPoseToParent();
+
+            status = fallbackVessel != null
+                ? "Free camera part anchor unavailable; switched to vessel anchor."
+                : "Free camera part anchor unavailable; switched to CPU vessel anchor.";
+            ShowHudMessage("Part anchor unavailable; using vessel anchor");
+        }
+
+        /// <summary>
+        /// Prefers the lost part's current vessel, which covers unloaded remote vessels,
+        /// then falls back to the CPU vessel used for SHIP-RAW coordinates.
+        /// </summary>
+        /// <param name="part">The part that was previously used as the anchor.</param>
+        /// <returns>A vessel suitable for a degraded ship anchor, or null.</returns>
+        private Vessel GetFallbackVesselForLostPart(Part part)
+        {
+            try
+            {
+                if (part != null && IsUsableVessel(part.vessel))
+                {
+                    return part.vessel;
+                }
+            }
+            catch (System.Exception)
+            {
+                // Unity/KSP can leave destroyed objects in a state where property
+                // access throws.  Fall through to the CPU-vessel fallback.
+            }
+
+            var cpuVessel = GetCpuVessel();
+            return IsUsableVessel(cpuVessel) ? cpuVessel : null;
+        }
+
+        /// <summary>
+        /// Finds a last-known world position without using the current anchor resolver,
+        /// avoiding recursion while recovering from a lost part anchor.
+        /// </summary>
+        /// <returns>The best available last-known camera world position.</returns>
+        private Vector3 ResolveFallbackWorldPosition()
+        {
+            if (hasDesiredPose)
+            {
+                return desiredPosition;
+            }
+
+            if (cameraParent != null)
+            {
+                return cameraParent.transform.position;
+            }
+
+            if (FlightCamera.fetch != null)
+            {
+                return FlightCamera.fetch.transform.position;
+            }
+
+            return GetCpuOrigin();
+        }
+
+        /// <summary>
+        /// Finds a last-known world rotation without using the current anchor resolver,
+        /// avoiding recursion while recovering from a lost part anchor.
+        /// </summary>
+        /// <returns>The best available last-known camera world rotation.</returns>
+        private Quaternion ResolveFallbackWorldRotation()
+        {
+            if (hasDesiredPose)
+            {
+                return desiredRotation;
+            }
+
+            if (cameraParent != null)
+            {
+                return cameraParent.transform.rotation;
+            }
+
+            if (FlightCamera.fetch != null)
+            {
+                return FlightCamera.fetch.transform.rotation;
+            }
+
+            return Quaternion.identity;
+        }
+
+        /// <summary>
+        /// Anchor vessel is lazily repaired if the stored vessel disappeared or is no
+        /// longer usable, falling back to the current CPU vessel when possible.
+        /// </summary>
+        /// <returns>A usable anchor vessel, or null if none is available.</returns>
         private Vessel GetAnchorVessel()
         {
             if (IsUsableVessel(anchorVessel))
@@ -807,6 +1345,14 @@ namespace kOS.AddOns.StockCamera
         private static bool IsUsableVessel(Vessel vessel)
         {
             return vessel != null && vessel.mainBody != null;
+        }
+
+        private static bool IsUsablePart(Part part)
+        {
+            return part != null &&
+                   part.transform != null &&
+                   part.vessel != null &&
+                   part.vessel.loaded;
         }
 
         private static Vector3 GetVesselOrigin(Vessel vessel)
@@ -853,6 +1399,58 @@ namespace kOS.AddOns.StockCamera
             return Quaternion.identity;
         }
 
+        /// <summary>
+        /// Builds a camera rotation from a look direction using the camera's body-up
+        /// vector.  Several fallbacks keep Quaternion.LookRotation stable near poles
+        /// or when forward is parallel to the preferred up vector.
+        /// </summary>
+        /// <param name="facingVector">World-space look direction, not a target point.</param>
+        /// <param name="cameraWorldPosition">Camera world position used to derive body-up.</param>
+        private Quaternion BuildFacingRotationFromVector(Vector3 facingVector, Vector3 cameraWorldPosition)
+        {
+            if (facingVector.sqrMagnitude < 0.000001f)
+            {
+                throw new kOS.Safe.Exceptions.KOSException("FREECAM:FACING vector must be non-zero.");
+            }
+
+            var forward = facingVector.normalized;
+
+            // Match kOS lookdirup(facingVector, cam:position - body:position):
+            // a vector FACING assignment is a look direction, and the effective up
+            // direction is the camera's local body-up vector at the camera position.
+            Vector3 up;
+            Vector3 surfaceNorth;
+            Vector3 surfaceEast;
+            GetStableReferenceFrame(cameraWorldPosition, out up, out surfaceNorth, out surfaceEast);
+
+            if (up.sqrMagnitude < 0.000001f || Vector3.Cross(forward, up).sqrMagnitude < 0.000001f)
+            {
+                up = surfaceNorth;
+            }
+
+            if (up.sqrMagnitude < 0.000001f || Vector3.Cross(forward, up).sqrMagnitude < 0.000001f)
+            {
+                up = surfaceEast;
+            }
+
+            if (up.sqrMagnitude < 0.000001f || Vector3.Cross(forward, up).sqrMagnitude < 0.000001f)
+            {
+                up = Vector3.up;
+            }
+
+            if (Vector3.Cross(forward, up).sqrMagnitude < 0.000001f)
+            {
+                up = Vector3.right;
+            }
+
+            return Quaternion.LookRotation(forward, up.normalized);
+        }
+
+        /// <summary>
+        /// Converts the public local-horizon HPR fields into a world rotation.  This
+        /// is deliberately based on the CPU vessel/body frame rather than the anchor
+        /// vessel frame, matching the documented current limitation.
+        /// </summary>
         private Quaternion BuildManualRotation()
         {
             Vector3 origin = GetCpuOrigin();
@@ -889,6 +1487,11 @@ namespace kOS.AddOns.StockCamera
             return Quaternion.LookRotation(forward, up);
         }
 
+        /// <summary>
+        /// Decomposes an exact Direction/FACING quaternion into approximate HPR fields
+        /// for display and for continuing from the same pose if the user later edits
+        /// HEADING, PITCH, or ROLL.
+        /// </summary>
         private void SetEulerFieldsFromRotation(Quaternion rotation)
         {
             Vector3 origin = GetCpuOrigin();
@@ -920,6 +1523,11 @@ namespace kOS.AddOns.StockCamera
             roll = NormalizeDegrees(-SignedAngle(zeroRollUp, cameraUp, forward));
         }
 
+        /// <summary>
+        /// Builds a numerically stable local-horizon frame at the supplied world
+        /// origin.  Used by HPR and vector-facing up semantics; includes fallbacks for
+        /// poles and degenerate body-axis projections.
+        /// </summary>
         private void GetStableReferenceFrame(Vector3 origin, out Vector3 up, out Vector3 north, out Vector3 east)
         {
             var vessel = GetCpuVessel();
@@ -968,6 +1576,11 @@ namespace kOS.AddOns.StockCamera
             east = Vector3.right;
         }
 
+        /// <summary>
+        /// Computes a signed angle around an explicit axis without relying on newer
+        /// Unity APIs.
+        /// </summary>
+        /// <returns>The signed angle in degrees.</returns>
         private static float SignedAngle(Vector3 from, Vector3 to, Vector3 axis)
         {
             from.Normalize();
@@ -995,14 +1608,13 @@ namespace kOS.AddOns.StockCamera
             {
                 case "SHIP":
                 case "VESSEL":
-                case "ANCHORVESSEL":
                     return FreeCameraAnchor.Ship;
                 case "BODY":
                 case "WORLD":
                 case "FIXED":
                     return FreeCameraAnchor.Body;
                 default:
-                    throw new System.ArgumentException("FREECAM:ANCHOR must be SHIP or BODY.");
+                    throw new System.ArgumentException("FREECAM:ANCHOR string must be SHIP/VESSEL or BODY.");
             }
         }
 
@@ -1044,6 +1656,11 @@ namespace kOS.AddOns.StockCamera
             return value;
         }
 
+        /// <summary>
+        /// Map view and similar camera modes are temporary.  Save the current freecam
+        /// pose, restore stock camera control, and remember that we should resume when
+        /// KSP returns to Flight camera mode.
+        /// </summary>
         private void SuspendForCameraMode(string reason)
         {
             if (!active)
@@ -1058,6 +1675,11 @@ namespace kOS.AddOns.StockCamera
             suspendedForCameraMode = true;
         }
 
+        /// <summary>
+        /// IVA/internal camera mode is a user-selected context, not a temporary map
+        /// transition.  Stop freecam immediately and delay FlightCamera reparenting
+        /// until KSP is safely back in Flight mode to avoid corrupting IVA entry.
+        /// </summary>
         private void DisableForIvaAndDeferRestore(string reason)
         {
             bool shouldShowDisableHud = active || requestedEnabled || suspendedForCameraMode;
@@ -1079,6 +1701,10 @@ namespace kOS.AddOns.StockCamera
             }
         }
 
+        /// <summary>
+        /// Persists the currently rendered freecam pose before handing FlightCamera
+        /// back to KSP, so a later resume starts from the same visual camera pose.
+        /// </summary>
         private void SaveCurrentFreeCameraPose()
         {
             if (cameraParent == null)
@@ -1090,6 +1716,11 @@ namespace kOS.AddOns.StockCamera
             StoreWorldRotationForCurrentAnchor(cameraParent.transform.rotation);
         }
 
+        /// <summary>
+        /// Completes the stock-camera restore that was intentionally skipped during
+        /// IVA entry.  It only runs after KSP reports that Flight camera mode is active
+        /// again.
+        /// </summary>
         private void TryRunDeferredStockRestore()
         {
             if (!deferredStockRestoreUntilFlight)
@@ -1122,6 +1753,11 @@ namespace kOS.AddOns.StockCamera
             }
         }
 
+        /// <summary>
+        /// Restores the captured stock FlightCamera transform, mode, target, distance,
+        /// FOV, and near clip.  This method assumes originalCamera is still the
+        /// snapshot captured before freecam took ownership.
+        /// </summary>
         private void RestoreStockCameraFromSnapshot()
         {
             if (flightCamera == null)
@@ -1162,6 +1798,13 @@ namespace kOS.AddOns.StockCamera
             flightCamera.ActivateUpdate();
         }
 
+        /// <summary>
+        /// Common restore path for disable, scene changes, suspension, and error
+        /// recovery.  clearRequest distinguishes a final user/error disable from a
+        /// temporary suspension that may resume later.
+        /// </summary>
+        /// <param name="clearRequest">True when this restore should clear the user's enable request.</param>
+        /// <param name="reason">Status message describing why restore happened.</param>
         private void RestoreCamera(bool clearRequest, string reason)
         {
             bool shouldShowDisableHud = clearRequest && (active || requestedEnabled || suspendedForCameraMode);
@@ -1221,6 +1864,10 @@ namespace kOS.AddOns.StockCamera
             }
         }
 
+        /// <summary>
+        /// FlightCamera.SetTargetNone is used during activation; restoring a vessel
+        /// target is required so stock camera follow behavior works again after disable.
+        /// </summary>
         private void RestoreStockTarget()
         {
             if (flightCamera == null || !HighLogic.LoadedSceneIsFlight)
@@ -1252,6 +1899,11 @@ namespace kOS.AddOns.StockCamera
             }
         }
 
+        /// <summary>
+        /// Detects whether KSP reset FlightCamera's parent or another mod took it.  A
+        /// known stock-parent reset can be repaired; an unknown parent change disables
+        /// freecam to avoid leaving the user's camera broken.
+        /// </summary>
         private void HandleCameraParentChanged()
         {
             if (flightCamera == null || cameraParent == null)
@@ -1274,6 +1926,11 @@ namespace kOS.AddOns.StockCamera
             RestoreCamera(true, "Another system changed FlightCamera parent; free camera disabled to avoid leaving the stock camera broken.");
         }
 
+        /// <summary>
+        /// Scene transitions invalidate camera/vessel/body references.  Clear all
+        /// cached state rather than carrying transforms or snapshots into the next
+        /// flight scene.
+        /// </summary>
         private void ClearFreeCameraStateForNewFlight(string reason)
         {
             active = false;
@@ -1292,9 +1949,14 @@ namespace kOS.AddOns.StockCamera
             anchor = FreeCameraAnchor.Ship;
             anchorFrame = FreeCameraAnchorFrame.Raw;
             anchorVessel = null;
+            anchorPart = null;
             anchorOffset = Vector3.zero;
             anchorFacingOffset = Vector3.zero;
             anchorFacingRotation = Quaternion.identity;
+            partLocalPosition = Vector3.zero;
+            partLocalRotation = Quaternion.identity;
+            partFallbackWorldPosition = Vector3.zero;
+            partFallbackWorldRotation = Quaternion.identity;
 
             bodyAnchorBody = null;
             bodyLocalPosition = Vector3.zero;
@@ -1363,6 +2025,20 @@ namespace kOS.AddOns.StockCamera
             }
         }
 
+        /// <summary>
+        /// Unity render callback used only to run the guarded BODY-anchor correction.
+        /// </summary>
+        /// <param name="renderingCamera">Camera entering pre-cull.</param>
+        private void OnCameraPreCull(Camera renderingCamera)
+        {
+            ApplyBodyAnchorRenderCorrection(renderingCamera);
+        }
+
+        /// <summary>
+        /// CameraManager events let us release control immediately when the player
+        /// changes camera context, instead of waiting for the next normal update path
+        /// to notice the mode change.
+        /// </summary>
         private void OnCameraChange(CameraManager.CameraMode mode)
         {
             if (mode != CameraManager.CameraMode.Flight && active)
@@ -1395,34 +2071,52 @@ namespace kOS.AddOns.StockCamera
             }
         }
 
+        /// <summary>
+        /// A scene load can destroy FlightCamera and vessel transforms.  Restore first
+        /// while objects may still exist, then clear all stored references.
+        /// </summary>
         private void OnGameSceneLoadRequested(GameScenes scene)
         {
             RestoreCamera(true, "Scene change requested; stock camera restored.");
             ClearFreeCameraStateForNewFlight("Scene change requested; free camera pose state cleared.");
         }
 
+        /// <summary>
+        /// Register once because the controller persists across scenes.
+        /// </summary>
         private void RegisterEvents()
-        {
-            if (eventsRegistered)
-            {
-                return;
-            }
-
-            GameEvents.OnCameraChange.Add(OnCameraChange);
-            GameEvents.onGameSceneLoadRequested.Add(OnGameSceneLoadRequested);
-            eventsRegistered = true;
-        }
-
-        private void UnregisterEvents()
         {
             if (!eventsRegistered)
             {
-                return;
+                GameEvents.OnCameraChange.Add(OnCameraChange);
+                GameEvents.onGameSceneLoadRequested.Add(OnGameSceneLoadRequested);
+                eventsRegistered = true;
             }
 
-            GameEvents.OnCameraChange.Remove(OnCameraChange);
-            GameEvents.onGameSceneLoadRequested.Remove(OnGameSceneLoadRequested);
-            eventsRegistered = false;
+            if (!cameraRenderEventRegistered)
+            {
+                Camera.onPreCull += OnCameraPreCull;
+                cameraRenderEventRegistered = true;
+            }
+        }
+
+        /// <summary>
+        /// Unregister on destroy to avoid stale delegates pointing at a dead singleton.
+        /// </summary>
+        private void UnregisterEvents()
+        {
+            if (eventsRegistered)
+            {
+                GameEvents.OnCameraChange.Remove(OnCameraChange);
+                GameEvents.onGameSceneLoadRequested.Remove(OnGameSceneLoadRequested);
+                eventsRegistered = false;
+            }
+
+            if (cameraRenderEventRegistered)
+            {
+                Camera.onPreCull -= OnCameraPreCull;
+                cameraRenderEventRegistered = false;
+            }
         }
     }
 }
