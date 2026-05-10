@@ -159,6 +159,20 @@ namespace kOS.AddOns.StockCamera
             }
         }
 
+        public float Distance
+        {
+            get { return GetCurrentRelativePosition().magnitude; }
+            set
+            {
+                var relativePosition = GetCurrentRelativePosition();
+                var scaledPosition = relativePosition.normalized * Mathf.Max(0f, value);
+                var worldPosition = GetCpuOrigin() + scaledPosition;
+                StoreWorldPositionForCurrentAnchor(worldPosition);
+                ApplyDesiredPoseToParent();
+                status = "Free camera distance set.";
+            }
+        }
+
         public Quaternion Facing
         {
             get { return ResolveDesiredWorldRotation(); }

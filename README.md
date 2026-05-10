@@ -155,6 +155,7 @@ Suffixes:
 | `STATUS` | `String` | Get | Human-readable status/debug text. |
 | `FOV` | `Scalar` | Get/Set | Camera field of view in degrees. Restored to the stock FOV when freecam is disabled. |
 | `POSITION` | `Vector` | Get/Set | Camera position in SHIP-RAW coordinates. |
+| `DISTANCE` | `Scalar` | Get/Set | Distance from the CPU vessel's CoM. Gets the same value as `cam:position:mag`; setting scales the current `POSITION` direction to the requested distance. |
 | `FACING` | `Direction` or `Vector` | Get/Set | Camera facing. Gets a kOS `Direction`; accepts a `Direction` or non-zero `Vector` look direction when set. Vector assignment uses the camera's body-up vector as the effective up direction. |
 | `HEADING`<br>`HDG` | `Scalar` | Get/Set | Local-horizon heading in degrees. `0` is north and `90` is east. |
 | `PITCH` | `Scalar` | Get/Set | Local-horizon pitch in degrees. Positive looks upward. |

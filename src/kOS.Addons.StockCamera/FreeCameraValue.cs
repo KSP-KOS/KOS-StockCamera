@@ -25,6 +25,7 @@ namespace kOS.AddOns.StockCamera
             AddSuffix("AVAILABLE", new Suffix<BooleanValue>(GetAvailable));
 
             AddSuffix("POSITION", new SetSuffix<Vector>(GetPosition, SetPosition));
+            AddSuffix("DISTANCE", new SetSuffix<ScalarValue>(GetDistance, SetDistance));
             AddSuffix("FACING", new SetSuffix<Structure>(GetFacing, SetFacing));
             AddSuffix("ANCHOR", new SetSuffix<Structure>(GetAnchor, SetAnchor));
             AddSuffix("ANCHORFRAME", new SetSuffix<StringValue>(GetAnchorFrame, SetAnchorFrame));
@@ -93,6 +94,24 @@ namespace kOS.AddOns.StockCamera
             EnsureFlightScene("POSITION");
             controller.SetSharedObjects(shared);
             controller.RelativePosition = value.ToVector3();
+        }
+
+        private ScalarValue GetDistance()
+        {
+            return ScalarValue.Create(controller.Distance);
+        }
+
+        private void SetDistance(ScalarValue value)
+        {
+            EnsureFlightScene("DISTANCE");
+            var distance = (float)value.GetDoubleValue();
+            if (distance < 0f)
+            {
+                throw new KOSException("FREECAM:DISTANCE must be greater than or equal to 0.");
+            }
+
+            controller.SetSharedObjects(shared);
+            controller.Distance = distance;
         }
 
         private Structure GetFacing()
