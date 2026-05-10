@@ -16,6 +16,9 @@ The addon exposes both stock-camera helpers and an optional free-camera mode:
 * `FREECAMERA` temporarily takes ownership of KSP's `FlightCamera` so scripts
   can set an exact camera pose, including position, facing, roll, anchor
   behavior, and vessel-relative camera frames.
+* `LIGHT` creates a camera-mounted spot light that follows the active gameplay
+  camera, including stock flight camera, free camera, map camera, and IVA when
+  a compatible render camera is available.
 
 The "stock" designation remains important. This addon works with KSP's existing
 camera systems. Other mods that replace or heavily modify camera behavior may
@@ -48,8 +51,18 @@ set cam:enabled to false.
 
 `FLIGHTCAMERA` and `FREECAMERA` are intentionally separate. Use
 `FLIGHTCAMERA` for normal stock camera control. Use `FREECAMERA` when a script
-needs temporary full-pose control of the flight camera. Avoid driving both from
+needs full-pose control of the flight camera. Avoid driving both from
 one script at the same time.
+
+Camera light usage:
+
+```kerboscript
+set light to addons:camera:light.
+set light:enabled to true.
+set light:intensity to 1.5.
+set light:range to 80.
+set light:angle to 45.
+```
 
 # Structures
 
@@ -65,10 +78,11 @@ Suffixes:
 
 | Suffix | Type | Get/Set | Description |
 |---|---:|:---:|---|
-| `FLIGHTCAMERA` | `FlightCamera` | Get | Returns the object which allows control of the stock camera in the flight scene. |
-| `MAPCAMERA` | `MapCamera` | Get | Returns the object which allows control of the camera in map view. |
-| `INTERNALCAMERA` | `InternalCamera` | Get | Returns the object which allows control of the IVA/internal camera. |
-| `FREECAMERA` | `FreeCamera` | Get | Returns the object which allows temporary full-pose control of the flight camera. |
+| `FLIGHTCAMERA` / `FLIGHT` | `FlightCamera` | Get | Returns the object which allows control of the stock camera in the flight scene. |
+| `MAPCAMERA` /  `MAP` | `MapCamera` | Get | Returns the object which allows control of the camera in map view. |
+| `INTERNALCAMERA` / `INTERNAL` | `InternalCamera` | Get | Returns the object which allows control of the IVA/internal camera. |
+| `FREECAMERA` / `FREE` | `FreeCamera` | Get | Returns the object which allows temporary full-pose control of the flight camera. |
+| `CAMERALIGHT` / `LIGHT` | `CameraLight` | Get | Returns the object which controls a camera-mounted spot light. |
 
 ## FLIGHTCAMERA
 
@@ -116,6 +130,7 @@ stock camera update model; it changes the same fields KSP normally uses.
 | `FOV`<br>`CAMERAFOV` | `Scalar` | Get/Set | Gets or sets the IVA camera field of view. |
 | `ACTIVEKERBAL` | `CrewMember` | Get/Set | Gets or sets the active IVA Kerbal. The Kerbal must be on the active vessel. |
 | `ACTIVE` | `Boolean` | Get | True when the current camera mode is IVA. |
+
 
 ## FREECAMERA
 
@@ -292,6 +307,52 @@ re-apply their body-local pose from `Camera.onPreCull`, but only for the active
 flight camera while freecam is active in Flight camera mode. This targeted
 render-time correction is intended to keep stationary/body-fixed cameras stable
 when KSP performs late floating-origin or Krakensbane corrections.
+
+## LIGHT
+
+`LIGHT` controls a Unity spot light that is kept just behind the active gameplay
+camera and pointed the same way as the camera. It is intended as a scriptable
+camera-mounted flashlight/fill light for night shots or dark interiors.
+
+Access:
+
+```kerboscript
+set light to addons:camera:light.
+```
+
+Suffixes:
+
+| Suffix | Type | Get/Set | Description |
+|---|---:|:---:|---|
+| `ENABLED` | `Boolean` | Get/Set | Enables or disables the camera light. |
+| `ACTIVE` | `Boolean` | Get | True when the Unity light exists and is currently enabled for a render camera. |
+| `AVAILABLE` | `Boolean` | Get | True when the addon can find a likely gameplay camera to follow. |
+| `STATUS` | `String` | Get | Human-readable status/debug text. |
+| `INTENSITY` | `Scalar` | Get/Set | Unity light intensity. Must be zero or greater. Default is `1`. |
+| `RANGE`<br>`FALLOFF` | `Scalar` | Get/Set | Unity light range in meters; this is the falloff distance. Must be greater than zero. Default is `50`. |
+| `ANGLE`<br>`FOV` | `Scalar` | Get/Set | Spot-light outer cone angle in degrees. Must be greater than `0` and less than `180`. Default is `45`. |
+| `DISTANCE` | `Scalar` | Get/Set | Distance behind the camera where the light origin is placed. Must be zero or greater. Default is `0.25`. |
+| `SHADOWS`<br>`SHADOW` | `Boolean` | Get/Set | Enables or disables Unity soft shadows for the light. Default is `false`. |
+| `COLOR`<br>`COLOUR` | `RGBA` | Get/Set | kOS color structure. Use values like `RGB(1, 0.92, 0.82)` or `WHITE`. Alpha is ignored.  |
+| `RED`<br>`R` | `Scalar` | Get/Set | Red color channel from `0` to `1`. Default is `1`. |
+| `GREEN`<br>`G` | `Scalar` | Get/Set | Green color channel from `0` to `1`. Default is `0.92`. |
+| `BLUE`<br>`B` | `Scalar` | Get/Set | Blue color channel from `0` to `1`. Default is `0.82`. |
+
+The default color is slightly warm white: `RGB(1, 0.92, 0.82)`. Printing `addons:camera:light` shows a one-line summary of the current light settings.
+
+Example:
+
+```kerboscript
+set light to addons:camera:light.
+set light:enabled to true.
+set light:intensity to 2.
+set light:range to 100.
+set light:angle to 35.
+set light:distance to 0.5.
+set light:color to RGB(1, 0.92, 0.82).
+set light:shadows to false.
+```
+
 
 # Building
 
