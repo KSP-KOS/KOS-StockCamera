@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using kOS.Safe.Encapsulation;
 using kOS.Safe.Encapsulation.Suffixes;
 using kOS.Safe.Utilities;
@@ -13,13 +13,16 @@ namespace kOS.AddOns.StockCamera
 		private MapCameraValue mapCam;
         private InternalCameraValue ivaCam;
         private FreeCameraValue freeCam;
+        private CameraLightValue cameraLight;
 
         public Addon(SharedObjects shared) : base(shared)
         {
-            AddSuffix("FLIGHTCAMERA", new Suffix<FlightCameraValue>(GetFlightCamera));
-			AddSuffix("MAPCAMERA", new Suffix<MapCameraValue>(GetMapCamera));
-            AddSuffix("INTERNALCAMERA", new Suffix<InternalCameraValue>(GetInternalCamera));
-            AddSuffix("FREECAMERA", new Suffix<FreeCameraValue>(GetFreeCamera));
+            
+            AddSuffix(new string[] { "FLIGHTCAMERA", "FLIGHT" }, new Suffix<FlightCameraValue>(GetFlightCamera));
+			AddSuffix(new string[] { "MAPCAMERA", "MAP" }, new Suffix<MapCameraValue>(GetMapCamera));
+            AddSuffix(new string[] { "INTERNALCAMERA", "INTERNAL" }, new Suffix<InternalCameraValue>(GetInternalCamera));
+            AddSuffix(new string[] { "FREECAMERA", "FREE" }, new Suffix<FreeCameraValue>(GetFreeCamera));
+            AddSuffix(new string[] { "LIGHT", "CAMERALIGHT" }, new Suffix<CameraLightValue>(GetCameraLight));
         }
 
 		public override BooleanValue Available()
@@ -61,6 +64,15 @@ namespace kOS.AddOns.StockCamera
                 ivaCam = new InternalCameraValue(shared);
             }
             return ivaCam;
+        }
+
+        private CameraLightValue GetCameraLight()
+        {
+            if (cameraLight == null)
+            {
+                cameraLight = new CameraLightValue();
+            }
+            return cameraLight;
         }
 	}
 }

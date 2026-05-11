@@ -25,16 +25,18 @@ namespace kOS.AddOns.StockCamera
             AddSuffix("AVAILABLE", new Suffix<BooleanValue>(GetAvailable));
 
             AddSuffix("POSITION", new SetSuffix<Vector>(GetPosition, SetPosition));
-            AddSuffix("ORIENTATION", new SetSuffix<Direction>(GetOrientation, SetOrientation));
-            AddSuffix("ANCHOR", new SetSuffix<StringValue>(GetAnchor, SetAnchor));
+            AddSuffix("DISTANCE", new SetSuffix<ScalarValue>(GetDistance, SetDistance));
+            AddSuffix("FACING", new SetSuffix<Structure>(GetFacing, SetFacing));
+            AddSuffix("ANCHOR", new SetSuffix<Structure>(GetAnchor, SetAnchor));
             AddSuffix("ANCHORFRAME", new SetSuffix<StringValue>(GetAnchorFrame, SetAnchorFrame));
-            AddSuffix("ANCHORVESSEL", new SetSuffix<VesselTarget>(GetAnchorVessel, SetAnchorVessel));
             AddSuffix("HEADING", new SetSuffix<ScalarValue>(GetHeading, SetHeading));
             AddSuffix("HDG", new SetSuffix<ScalarValue>(GetHeading, SetHeading));
             AddSuffix("PITCH", new SetSuffix<ScalarValue>(GetPitch, SetPitch));
             AddSuffix("ROLL", new SetSuffix<ScalarValue>(GetRoll, SetRoll));
 
-            AddSuffix("SETPOSE", new TwoArgsSuffix<Vector, Direction>(SetPose));
+            AddSuffix("SETPOSE", new TwoArgsSuffix<Vector, Structure>(SetPose));
+            AddSuffix("LOOKAT", new OneArgsSuffix<Vector>(LookAt));
+            AddSuffix("MOVE", new OneArgsSuffix<Vector>(Move));
             AddSuffix("RESET", new NoArgsVoidSuffix(Reset));
             AddSuffix("COPYFROMSTOCK", new NoArgsVoidSuffix(CopyFromStock));
         }
@@ -94,24 +96,57 @@ namespace kOS.AddOns.StockCamera
             controller.RelativePosition = value.ToVector3();
         }
 
-        private Direction GetOrientation()
+        private ScalarValue GetDistance()
         {
-            return new Direction(controller.Orientation);
+            return ScalarValue.Create(controller.Distance);
         }
 
-        private void SetOrientation(Direction value)
+        private void SetDistance(ScalarValue value)
         {
-            EnsureFlightScene("ORIENTATION");
-            if (value == null)
+            EnsureFlightScene("DISTANCE");
+            var distance = (float)value.GetDoubleValue();
+            if (distance < 0f)
             {
-                throw new KOSException("FREECAM:ORIENTATION must be a Direction.");
+                throw new KOSException("FREECAM:DISTANCE must be greater than or equal to 0.");
             }
 
             controller.SetSharedObjects(shared);
-            controller.Orientation = value.Rotation;
+            controller.Distance = distance;
         }
 
-        private void SetPose(Vector position, Direction orientation)
+        private Structure GetFacing()
+        {
+            return new Direction(controller.Facing);
+        }
+
+        private void SetFacing(Structure value)
+        {
+            EnsureFlightScene("FACING");
+            if (value == null)
+            {
+                throw new KOSException("FREECAM:FACING must be a Direction or non-zero Vector direction.");
+            }
+
+            controller.SetSharedObjects(shared);
+
+            var direction = value as Direction;
+            if (direction != null)
+            {
+                controller.Facing = direction.Rotation;
+                return;
+            }
+
+            var vector = value as Vector;
+            if (vector != null)
+            {
+                controller.SetFacingVector(vector.ToVector3());
+                return;
+            }
+
+            throw new KOSException("FREECAM:FACING must be a Direction or non-zero Vector direction.");
+        }
+
+        private void SetPose(Vector position, Structure facing)
         {
             EnsureFlightScene("SETPOSE");
             if (position == null)
@@ -119,32 +154,147 @@ namespace kOS.AddOns.StockCamera
                 throw new KOSException("FREECAM:SETPOSE first argument must be a Vector position.");
             }
 
-            if (orientation == null)
+            if (facing == null)
             {
-                throw new KOSException("FREECAM:SETPOSE second argument must be a Direction orientation.");
+                throw new KOSException("FREECAM:SETPOSE second argument must be a Direction or non-zero Vector direction.");
             }
 
             controller.SetSharedObjects(shared);
-            controller.SetPose(position.ToVector3(), orientation.Rotation);
+
+            var direction = facing as Direction;
+            if (direction != null)
+            {
+                controller.SetPose(position.ToVector3(), direction.Rotation);
+                return;
+            }
+
+            var vector = facing as Vector;
+            if (vector != null)
+            {
+                controller.SetPose(position.ToVector3(), vector.ToVector3());
+                return;
+            }
+
+            throw new KOSException("FREECAM:SETPOSE second argument must be a Direction or non-zero Vector direction.");
         }
 
-        private StringValue GetAnchor()
+        private void LookAt(Vector targetPosition)
         {
-            return new StringValue(controller.Anchor);
+            EnsureFlightScene("LOOKAT");
+            if (targetPosition == null)
+            {
+                throw new KOSException("FREECAM:LOOKAT argument must be a Vector target position.");
+            }
+
+            controller.SetSharedObjects(shared);
+            controller.LookAt(targetPosition.ToVector3());
         }
 
-        private void SetAnchor(StringValue value)
+        private void Move(Vector delta)
+        {
+            EnsureFlightScene("MOVE");
+            if (delta == null)
+            {
+                throw new KOSException("FREECAM:MOVE argument must be a Vector delta.");
+            }
+
+            controller.SetSharedObjects(shared);
+            controller.Move(delta.ToVector3());
+        }
+
+        private Structure GetAnchor()
+        {
+            switch (controller.AnchorMode)
+            {
+                case FreeCameraAnchor.Part:
+                    var part = controller.AnchorPart;
+                    if (part == null)
+                    {
+                        throw new KOSException("FREECAM:ANCHOR part is unavailable because the anchor part no longer exists.");
+                    }
+
+                    return Suffixed.Part.PartValueFactory.Construct(part, shared);
+                case FreeCameraAnchor.Body:
+                    var body = controller.AnchorBody;
+                    if (body == null)
+                    {
+                        throw new KOSException("FREECAM:ANCHOR body is unavailable because no celestial body is available.");
+                    }
+
+                    return BodyTarget.CreateOrGetExisting(body, shared);
+                case FreeCameraAnchor.Ship:
+                default:
+                    var vessel = controller.AnchorVessel;
+                    if (vessel == null)
+                    {
+                        throw new KOSException("FREECAM:ANCHOR vessel is unavailable because no vessel is available.");
+                    }
+
+                    return VesselTarget.CreateOrGetExisting(vessel, shared);
+            }
+        }
+
+        private void SetAnchor(Structure value)
         {
             EnsureFlightScene("ANCHOR");
+            if (value == null)
+            {
+                throw new KOSException("FREECAM:ANCHOR must be a Vessel, Part, Body, or anchor string.");
+            }
+
             controller.SetSharedObjects(shared);
+
             try
             {
-                controller.Anchor = value.ToString();
+                var anchorString = value as StringValue;
+                if (anchorString != null)
+                {
+                    controller.SetAnchor(anchorString.ToString());
+                    return;
+                }
+
+                var vessel = value as VesselTarget;
+                if (vessel != null)
+                {
+                    if (vessel.Vessel == null)
+                    {
+                        throw new KOSException("FREECAM:ANCHOR vessel is unavailable.");
+                    }
+
+                    controller.SetAnchor(vessel.Vessel);
+                    return;
+                }
+
+                var part = value as Suffixed.Part.PartValue;
+                if (part != null)
+                {
+                    if (part.Part == null)
+                    {
+                        throw new KOSException("FREECAM:ANCHOR part is unavailable.");
+                    }
+
+                    controller.SetAnchor(part.Part);
+                    return;
+                }
+
+                var body = value as BodyTarget;
+                if (body != null)
+                {
+                    if (body.Body == null)
+                    {
+                        throw new KOSException("FREECAM:ANCHOR body is unavailable.");
+                    }
+
+                    controller.SetAnchor(body.Body);
+                    return;
+                }
             }
             catch (System.ArgumentException ex)
             {
                 throw new KOSException(ex.Message);
             }
+
+            throw new KOSException("FREECAM:ANCHOR must be a Vessel, Part, Body, or anchor string.");
         }
 
         private StringValue GetAnchorFrame()
@@ -164,29 +314,6 @@ namespace kOS.AddOns.StockCamera
             {
                 throw new KOSException(ex.Message);
             }
-        }
-
-        private VesselTarget GetAnchorVessel()
-        {
-            var vessel = controller.AnchorVessel;
-            if (vessel == null)
-            {
-                throw new KOSException("FREECAM:ANCHORVESSEL is unavailable because no vessel is available.");
-            }
-
-            return VesselTarget.CreateOrGetExisting(vessel, shared);
-        }
-
-        private void SetAnchorVessel(VesselTarget value)
-        {
-            EnsureFlightScene("ANCHORVESSEL");
-            if (value == null || value.Vessel == null)
-            {
-                throw new KOSException("FREECAM:ANCHORVESSEL must be a Vessel.");
-            }
-
-            controller.SetSharedObjects(shared);
-            controller.AnchorVessel = value.Vessel;
         }
 
         private ScalarValue GetHeading()
